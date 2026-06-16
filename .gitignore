@@ -1,0 +1,22 @@
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.log
+*.tmp
+
+# Python old app
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local publish/output
+publish/
+installer/output/
+Output/
+
+# OS
+Thumbs.db
+.DS_Store
