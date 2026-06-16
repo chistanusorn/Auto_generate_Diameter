@@ -13,6 +13,7 @@ Public NotInheritable Class ManualImageAlignmentDialog
     Private ReadOnly _cropButton As New Button()
     Private ReadOnly _perspectiveButton As New Button()
     Private _preparedImagePath As String = ""
+    Private _preparedGrid As DetectedGrid
 
     Public Property ResultImagePath As String = ""
 
@@ -91,7 +92,8 @@ Public NotInheritable Class ManualImageAlignmentDialog
             _cropButton.Enabled = True
             _cropButton.Text = "Compare prepared image"
             _perspectiveButton.Enabled = False
-            _instruction.Text = "Preview: confirm that the selected frame is correct, then click Compare prepared image."
+            Dim gridText = If(_preparedGrid Is Nothing, "grid overlay: not detected", _preparedGrid.Summary)
+            _instruction.Text = $"Preview: confirm frame and green grid overlay, then click Compare prepared image. {gridText}."
             Return
         End If
         _cropButton.Enabled = count = 4
@@ -125,6 +127,7 @@ Public NotInheritable Class ManualImageAlignmentDialog
             Application.DoEvents()
             _preparedImagePath = PerspectiveImageAligner.Align(_sourcePath, _view.Points, New Size(1760, 1000))
             _view.ImagePath = _preparedImagePath
+            DetectPreparedGrid()
             UpdateInstruction(Me, EventArgs.Empty)
         Catch ex As Exception
             MessageBox.Show(Me, ex.Message, "Cannot align image", MessageBoxButtons.OK, MessageBoxIcon.Error)
@@ -150,6 +153,7 @@ Public NotInheritable Class ManualImageAlignmentDialog
             Application.DoEvents()
             _preparedImagePath = PerspectiveImageAligner.Crop(_sourcePath, _view.Points)
             _view.ImagePath = _preparedImagePath
+            DetectPreparedGrid()
             UpdateInstruction(Me, EventArgs.Empty)
         Catch ex As Exception
             MessageBox.Show(Me, ex.Message, "Cannot crop image", MessageBoxButtons.OK, MessageBoxIcon.Error)
@@ -163,7 +167,14 @@ Public NotInheritable Class ManualImageAlignmentDialog
     Private Sub ResetAlignment(sender As Object, eventArgs As EventArgs)
         DeletePreparedImage()
         _view.ImagePath = _sourcePath
+        _view.Grid = Nothing
+        _preparedGrid = Nothing
         UpdateInstruction(Me, EventArgs.Empty)
+    End Sub
+
+    Private Sub DetectPreparedGrid()
+        _preparedGrid = TableGridDetector.Detect(_preparedImagePath)
+        _view.Grid = _preparedGrid
     End Sub
 
     Private Sub DeletePreparedImage()
@@ -186,6 +197,7 @@ Public NotInheritable Class CornerSelectionView
 
     Private ReadOnly _points As New List(Of PointF)
     Private _image As Image
+    Private _grid As DetectedGrid
 
     Public Event PointsChanged As EventHandler
 
@@ -208,6 +220,16 @@ Public NotInheritable Class CornerSelectionView
         End Set
         Get
             Return ""
+        End Get
+    End Property
+
+    Public Property Grid As DetectedGrid
+        Set(value As DetectedGrid)
+            _grid = value
+            Invalidate()
+        End Set
+        Get
+            Return _grid
         End Get
     End Property
 
@@ -244,6 +266,7 @@ Public NotInheritable Class CornerSelectionView
         Dim bounds = DisplayBounds()
         e.Graphics.InterpolationMode = Drawing2D.InterpolationMode.HighQualityBicubic
         e.Graphics.DrawImage(_image, bounds)
+        DrawGridOverlay(e.Graphics, bounds)
 
         Dim displayPoints = _points.Select(Function(point) ImageToDisplay(point, bounds)).ToArray()
         If displayPoints.Length > 1 Then
@@ -263,6 +286,48 @@ Public NotInheritable Class CornerSelectionView
                 e.Graphics.DrawString((index + 1).ToString(), font, brush, point.X + 10, point.Y - 20)
             End Using
         Next
+    End Sub
+
+    Private Sub DrawGridOverlay(graphics As Graphics, bounds As RectangleF)
+        If _grid Is Nothing OrElse _image Is Nothing Then Return
+        Using linePen As New Pen(Color.FromArgb(210, 0, 210, 80), 2)
+            If _grid.VerticalPaths.Count > 0 OrElse _grid.HorizontalPaths.Count > 0 Then
+                For Each path In _grid.VerticalPaths
+                    DrawGridPath(graphics, linePen, path, bounds)
+                Next
+                For Each path In _grid.HorizontalPaths
+                    DrawGridPath(graphics, linePen, path, bounds)
+                Next
+            ElseIf _grid.VerticalSegments.Count > 0 OrElse _grid.HorizontalSegments.Count > 0 Then
+                For Each segment In _grid.VerticalSegments
+                    graphics.DrawLine(linePen, ImageToDisplay(New PointF(segment.X1, segment.Y1), bounds), ImageToDisplay(New PointF(segment.X2, segment.Y2), bounds))
+                Next
+                For Each segment In _grid.HorizontalSegments
+                    graphics.DrawLine(linePen, ImageToDisplay(New PointF(segment.X1, segment.Y1), bounds), ImageToDisplay(New PointF(segment.X2, segment.Y2), bounds))
+                Next
+            Else
+                For Each imageX In _grid.VerticalLines
+                    Dim displayX = bounds.X + imageX * bounds.Width / _image.Width
+                    graphics.DrawLine(linePen, displayX, bounds.Top, displayX, bounds.Bottom)
+                Next
+                For Each imageY In _grid.HorizontalLines
+                    Dim displayY = bounds.Y + imageY * bounds.Height / _image.Height
+                    graphics.DrawLine(linePen, bounds.Left, displayY, bounds.Right, displayY)
+                Next
+            End If
+        End Using
+    End Sub
+
+    Private Sub DrawGridPath(graphics As Graphics, pen As Pen, path As GridLinePath, bounds As RectangleF)
+        If path Is Nothing OrElse path.Points.Count = 0 Then Return
+        If path.Points.Count = 1 Then
+            Dim point = ImageToDisplay(path.Points(0), bounds)
+            graphics.DrawEllipse(pen, point.X - 1.5F, point.Y - 1.5F, 3, 3)
+            Return
+        End If
+
+        Dim displayPoints = path.Points.Select(Function(point) ImageToDisplay(point, bounds)).ToArray()
+        graphics.DrawLines(pen, displayPoints)
     End Sub
 
     Private Function DisplayBounds() As RectangleF
