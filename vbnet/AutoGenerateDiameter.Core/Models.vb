@@ -14,6 +14,20 @@ Public NotInheritable Class Measurement
     Public Property LDash As Boolean
 End Class
 
+' A single table cell to OCR, expressed as normalized (0–1) coordinates of the
+' source image plus its logical position. The imaging layer (WinForms) crops the
+' region; the Core layer runs OCR. Keeping coordinates normalized lets Core stay
+' free of any System.Drawing dependency.
+Public NotInheritable Class CellRegion
+    Public Property TrayPosition As Integer
+    Public Property RowNumber As Integer
+    Public Property Side As String = ""
+    Public Property Left As Double
+    Public Property Top As Double
+    Public Property Width As Double
+    Public Property Height As Double
+End Class
+
 Public NotInheritable Class SheetData
     Public Property PageNumber As Integer
     Public Property TotalPages As Integer

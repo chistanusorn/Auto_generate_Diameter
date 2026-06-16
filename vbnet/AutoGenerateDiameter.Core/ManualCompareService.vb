@@ -4,6 +4,7 @@ Option Explicit On
 Imports System.Diagnostics
 Imports System.Globalization
 Imports System.Text.RegularExpressions
+Imports System.Threading.Tasks
 
 Public NotInheritable Class CompareItem
     Public Property Category As String = ""
@@ -100,6 +101,141 @@ Public NotInheritable Class ManualCompareService
             ToList()
         Return CompareTsvs(numericTsvs, textTsvs, sheet, path)
     End Function
+
+    ' Cell-level OCR: instead of running Tesseract on the whole sheet and then matching
+    ' detected numbers to cells by distance, this crops every expected cell first and OCRs
+    ' it in isolation. The geometry must be reliable, so callers should only use this on a
+    ' perspective-aligned/cropped image (see LayoutFor's "aligned" branch).
+    '
+    ' fullPreprocessedPath : whole binarized sheet, used only for the metadata (lot/tray) text pass.
+    ' cellExtractor        : given a normalized CellRegion, returns a temp PNG path of that cropped,
+    '                        preprocessed cell. Implemented by the imaging layer (ImagePreprocessor.ExtractCell).
+    Public Function CompareImageByCell(fullPreprocessedPath As String, sheet As SheetData, cellExtractor As Func(Of CellRegion, String)) As CompareResult
+        If cellExtractor Is Nothing Then Throw New ArgumentNullException(NameOf(cellExtractor))
+        If Not IO.File.Exists(fullPreprocessedPath) Then Throw New IO.FileNotFoundException("Cannot read the selected image.", fullPreprocessedPath)
+        Dim executable = TesseractRuntime.FindExecutable()
+        If executable Is Nothing Then Throw New InvalidOperationException("Tesseract OCR runtime is missing. Repair or reinstall the application.")
+
+        Dim layout = LayoutFor(0, 0, fullPreprocessedPath)
+
+        ' Build one target per expected R/L value.
+        Dim targets As New List(Of CellTarget)
+        For Each measurement In sheet.Measurements.OrderBy(Function(item) item.TrayPosition).ThenBy(Function(item) item.RowNumber)
+            If measurement.RPresent Then targets.Add(NewCellTarget(layout, measurement, "R", measurement.RDiameter))
+            If measurement.LPresent Then targets.Add(NewCellTarget(layout, measurement, "L", measurement.LDiameter))
+        Next
+
+        ' Crop serially — GDI+ on a shared source image is not thread-safe.
+        For Each target In targets
+            target.CellPath = cellExtractor(target.Region)
+        Next
+
+        ' OCR in parallel — each call is an independent Tesseract subprocess, so this is the
+        ' part worth parallelizing (a few hundred cells would otherwise run for minutes).
+        Parallel.ForEach(targets, Sub(target)
+                                      Try
+                                          Dim cell = OcrCell(executable, target.CellPath, target.Measurement.RowNumber)
+                                          target.OcrValue = cell.Value
+                                          target.OcrConfidence = cell.Confidence
+                                      Catch
+                                          target.OcrValue = ""
+                                          target.OcrConfidence = 0
+                                      End Try
+                                  End Sub)
+
+        ' Clean up cropped cell temp files.
+        For Each target In targets
+            DeleteCellTemp(target.CellPath)
+        Next
+
+        Dim result As New CompareResult With {
+            .ImagePath = fullPreprocessedPath,
+            .RawText = String.Join(" ", targets.Where(Function(t) t.OcrValue <> "").Select(Function(t) t.OcrValue)),
+            .DetectedFormat = "ALIGNED"
+        }
+
+        For Each target In targets
+            result.Items.Add(BuildCellItem(target))
+        Next
+
+        ' Metadata (tray lot / tray number) still needs a whole-image text pass.
+        Dim textTsvs = {"6", "11"}.Select(Function(psm) RunTesseract(executable, fullPreprocessedPath, psm, Nothing)).ToList()
+        Dim textTsv = String.Join(Environment.NewLine, textTsvs)
+        Dim hasMetadata = HasTrayMetadata(textTsv)
+        Dim expectsMetadata = sheet.Measurements.Any(Function(item) item.LotNumber <> "" OrElse item.TrayNumber <> "")
+        result.DetectedFormat = If(hasMetadata, "NEW", If(expectsMetadata, "ALIGNED", "OLD"))
+        AddOptionalMetadata(result, textTsv, sheet)
+        Return result
+    End Function
+
+    ' Public entry point used by accuracy tests: OCR a single already-cropped cell image.
+    Public Function OcrCellImage(cellPath As String, rowNumber As Integer) As String
+        Dim executable = TesseractRuntime.FindExecutable()
+        If executable Is Nothing Then Throw New InvalidOperationException("Tesseract OCR runtime is missing.")
+        Return OcrCell(executable, cellPath, rowNumber).Value
+    End Function
+
+    Private Function NewCellTarget(layout As TableLayout, measurement As Measurement, side As String, expected As Double) As CellTarget
+        Dim bounds = CellBounds(layout, measurement.TrayPosition, measurement.RowNumber, side)
+        Return New CellTarget With {
+            .Measurement = measurement,
+            .Side = side,
+            .Expected = Math.Round(expected).ToString(CultureInfo.InvariantCulture),
+            .Bounds = bounds,
+            .Region = New CellRegion With {
+                .TrayPosition = measurement.TrayPosition,
+                .RowNumber = measurement.RowNumber,
+                .Side = side,
+                .Left = bounds.Left,
+                .Top = bounds.Top,
+                .Width = bounds.Width,
+                .Height = bounds.Height
+            }
+        }
+    End Function
+
+    Private Shared Function BuildCellItem(target As CellTarget) As CompareItem
+        Dim result = CreateItem("Diameter", target.Measurement, target.Side, target.Expected, target.Bounds)
+        result.OcrValue = target.OcrValue
+        result.Confidence = target.OcrConfidence
+        If target.OcrValue = "" Then
+            result.Status = "MISSING"
+        ElseIf target.OcrConfidence < 40 Then
+            result.Status = "LOW CONFIDENCE"
+        ElseIf target.OcrValue = target.Expected Then
+            result.Status = "MATCH"
+        Else
+            result.Status = "MISMATCH"
+        End If
+        Return result
+    End Function
+
+    ' Run a few single-cell PSM modes, merge by voting, return the best numeric reading.
+    Private Shared Function OcrCell(executable As String, cellPath As String, rowNumber As Integer) As (Value As String, Confidence As Double)
+        If String.IsNullOrWhiteSpace(cellPath) OrElse Not IO.File.Exists(cellPath) Then Return ("", 0)
+        Dim tsvs = {"7", "8", "10", "6"}.
+            Select(Function(psm) RunTesseract(executable, cellPath, psm, "0123456789")).
+            ToList()
+        Dim words = MergeOcrPasses(tsvs)
+        Dim best = words.
+            Select(Function(word) New With {.Word = word, .Value = NormalizeDiameter(word.Text, rowNumber)}).
+            Where(Function(item) item.Value IsNot Nothing).
+            OrderByDescending(Function(item) item.Word.VoteCount).
+            ThenByDescending(Function(item) item.Word.Confidence).
+            FirstOrDefault()
+        If best Is Nothing Then Return ("", 0)
+        Return (best.Value, Math.Max(best.Word.Confidence, Math.Min(99, best.Word.VoteCount * 25)))
+    End Function
+
+    Private Shared Sub DeleteCellTemp(path As String)
+        If String.IsNullOrWhiteSpace(path) Then Return
+        Dim fileName = IO.Path.GetFileName(path)
+        If Not fileName.StartsWith("AutoGenerateDiameter-ocr-cell-", StringComparison.OrdinalIgnoreCase) Then Return
+        Try
+            If IO.File.Exists(path) Then IO.File.Delete(path)
+        Catch
+        End Try
+    End Sub
 
     Private Shared Function RunTesseract(executable As String, path As String, psm As String, whitelist As String) As String
         Dim startInfo As New ProcessStartInfo With {
@@ -455,5 +591,16 @@ Public NotInheritable Class ManualCompareService
         Public Property RowNumber As Integer
         Public Property Side As String = ""
         Public Property Bounds As NormalizedBounds
+    End Class
+
+    Private NotInheritable Class CellTarget
+        Public Property Measurement As Measurement
+        Public Property Side As String = ""
+        Public Property Expected As String = ""
+        Public Property Bounds As NormalizedBounds
+        Public Property Region As CellRegion
+        Public Property CellPath As String = ""
+        Public Property OcrValue As String = ""
+        Public Property OcrConfidence As Double
     End Class
 End Class
