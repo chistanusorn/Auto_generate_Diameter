@@ -112,6 +112,8 @@ Public NotInheritable Class ManualCompareService
         startInfo.ArgumentList.Add(path)
         TesseractRuntime.Configure(startInfo, executable)
         startInfo.ArgumentList.Add("stdout")
+        startInfo.ArgumentList.Add("--dpi")
+        startInfo.ArgumentList.Add("300")
         startInfo.ArgumentList.Add("--psm")
         startInfo.ArgumentList.Add(psm)
         If whitelist IsNot Nothing Then
