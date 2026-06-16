@@ -114,6 +114,8 @@ Public NotInheritable Class ManualCompareService
         startInfo.ArgumentList.Add("stdout")
         startInfo.ArgumentList.Add("--dpi")
         startInfo.ArgumentList.Add("300")
+        startInfo.ArgumentList.Add("--oem")
+        startInfo.ArgumentList.Add("1")
         startInfo.ArgumentList.Add("--psm")
         startInfo.ArgumentList.Add(psm)
         If whitelist IsNot Nothing Then
