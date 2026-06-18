@@ -548,10 +548,15 @@ End Class
 Public NotInheritable Class EditLogViewerDialog
     Inherits Form
 
+    Private Const AllDates As String = "All dates"
+    Private Const DateFormat As String = "yyyy-MM-dd"
+
     Private ReadOnly _store As EditLogStore
     Private ReadOnly _grid As New DataGridView()
     Private ReadOnly _empty As New Label()
     Private ReadOnly _count As New Label()
+    Private ReadOnly _dateFilter As New ComboBox()
+    Private _allEntries As New List(Of EditLogEntry)
 
     Public Sub New(store As EditLogStore)
         _store = store
@@ -588,6 +593,23 @@ Public NotInheritable Class EditLogViewerDialog
         _empty.Font = New Font("Segoe UI", 11)
         _empty.Visible = False
 
+        Dim filterBar As New FlowLayoutPanel With {
+            .Dock = DockStyle.Top,
+            .FlowDirection = FlowDirection.LeftToRight,
+            .Height = 44,
+            .Padding = New Padding(8, 10, 8, 8),
+            .BackColor = Color.White
+        }
+        filterBar.Controls.Add(New Label With {
+            .Text = "Show log for date:",
+            .AutoSize = True,
+            .Margin = New Padding(2, 6, 6, 0)
+        })
+        _dateFilter.DropDownStyle = ComboBoxStyle.DropDownList
+        _dateFilter.Width = 160
+        AddHandler _dateFilter.SelectedIndexChanged, AddressOf OnDateFilterChanged
+        filterBar.Controls.Add(_dateFilter)
+
         Dim buttons As New FlowLayoutPanel With {
             .Dock = DockStyle.Bottom,
             .FlowDirection = FlowDirection.RightToLeft,
@@ -597,13 +619,10 @@ Public NotInheritable Class EditLogViewerDialog
         Dim closeButton = New Button With {.Text = "Close", .DialogResult = DialogResult.Cancel, .AutoSize = True}
         Dim exportButton = New Button With {.Text = "Export to Excel", .AutoSize = True}
         AddHandler exportButton.Click, AddressOf ExportXlsx
-        Dim openButton = New Button With {.Text = "Open CSV", .AutoSize = True}
-        AddHandler openButton.Click, AddressOf OpenCsv
         Dim refreshButton = New Button With {.Text = "Refresh", .AutoSize = True}
         AddHandler refreshButton.Click, Sub() LoadEntries()
         buttons.Controls.Add(closeButton)
         buttons.Controls.Add(exportButton)
-        buttons.Controls.Add(openButton)
         buttons.Controls.Add(refreshButton)
 
         _count.AutoSize = True
@@ -614,6 +633,7 @@ Public NotInheritable Class EditLogViewerDialog
 
         Controls.Add(_grid)
         Controls.Add(_empty)
+        Controls.Add(filterBar)
         Controls.Add(buttons)
         CancelButton = closeButton
 
@@ -631,9 +651,42 @@ Public NotInheritable Class EditLogViewerDialog
     End Sub
 
     Private Sub LoadEntries()
+        _allEntries = _store.ReadAll().OrderByDescending(Function(entry) entry.Timestamp).ToList()
+        PopulateDateFilter()
+        ApplyFilter()
+    End Sub
+
+    ' Rebuild the day list from whatever is in the log, keeping the operator's current
+    ' choice selected when that day still exists.
+    Private Sub PopulateDateFilter()
+        Dim selected = TryCast(_dateFilter.SelectedItem, String)
+        RemoveHandler _dateFilter.SelectedIndexChanged, AddressOf OnDateFilterChanged
+        _dateFilter.Items.Clear()
+        _dateFilter.Items.Add(AllDates)
+        For Each day In _allEntries.Select(Function(entry) entry.Timestamp.Date).Distinct().OrderByDescending(Function(d) d)
+            _dateFilter.Items.Add(day.ToString(DateFormat, CultureInfo.InvariantCulture))
+        Next
+        Dim index = If(selected Is Nothing, -1, _dateFilter.Items.IndexOf(selected))
+        _dateFilter.SelectedIndex = If(index < 0, 0, index)
+        AddHandler _dateFilter.SelectedIndexChanged, AddressOf OnDateFilterChanged
+    End Sub
+
+    Private Sub OnDateFilterChanged(sender As Object, eventArgs As EventArgs)
+        ApplyFilter()
+    End Sub
+
+    Private Function CurrentView() As List(Of EditLogEntry)
+        Dim selected = TryCast(_dateFilter.SelectedItem, String)
+        If selected Is Nothing OrElse selected = AllDates Then Return _allEntries
+        Return _allEntries.
+            Where(Function(entry) entry.Timestamp.ToString(DateFormat, CultureInfo.InvariantCulture) = selected).
+            ToList()
+    End Function
+
+    Private Sub ApplyFilter()
+        Dim view = CurrentView()
         _grid.Rows.Clear()
-        Dim entries = _store.ReadAll().OrderByDescending(Function(entry) entry.Timestamp).ToList()
-        For Each entry In entries
+        For Each entry In view
             _grid.Rows.Add(
                 entry.Timestamp.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
                 entry.OperatorName,
@@ -643,40 +696,32 @@ Public NotInheritable Class EditLogViewerDialog
                 entry.NewValue
             )
         Next
-        _grid.Visible = entries.Count > 0
-        _empty.Visible = entries.Count = 0
-        _count.Text = $"{entries.Count} edit(s) logged"
+        _grid.Visible = view.Count > 0
+        _empty.Visible = view.Count = 0
+        _count.Text = $"{view.Count} edit(s) logged"
     End Sub
 
     Private Sub ExportXlsx(sender As Object, eventArgs As EventArgs)
+        Dim view = CurrentView()
+        If view.Count = 0 Then
+            MessageBox.Show(Me, "There are no log entries to export.", "Export Edit Log", MessageBoxButtons.OK, MessageBoxIcon.Information)
+            Return
+        End If
+        Dim selected = TryCast(_dateFilter.SelectedItem, String)
+        Dim suffix = If(selected Is Nothing OrElse selected = AllDates, "AllDates", selected)
         Using dialog As New SaveFileDialog With {
             .Title = "Export edit log to Excel",
             .Filter = "Excel workbook (*.xlsx)|*.xlsx",
-            .FileName = $"EditLog_{Date.Now:yyyyMMdd_HHmmss}.xlsx"
+            .FileName = $"EditLog_{suffix}.xlsx"
         }
             If dialog.ShowDialog(Me) <> DialogResult.OK Then Return
             Try
-                _store.ExportToXlsx(dialog.FileName)
+                _store.ExportToXlsx(dialog.FileName, view)
                 MessageBox.Show(Me, "Edit log exported to Excel.", "Export Edit Log", MessageBoxButtons.OK, MessageBoxIcon.Information)
             Catch ex As Exception
                 MessageBox.Show(Me, ex.Message, "Export Edit Log failed", MessageBoxButtons.OK, MessageBoxIcon.Error)
             End Try
         End Using
-    End Sub
-
-    Private Sub OpenCsv(sender As Object, eventArgs As EventArgs)
-        If Not IO.File.Exists(_store.FilePath) Then
-            MessageBox.Show(Me, "No edit log file has been created yet.", "Edit Log", MessageBoxButtons.OK, MessageBoxIcon.Information)
-            Return
-        End If
-        Try
-            Diagnostics.Process.Start(New Diagnostics.ProcessStartInfo With {
-                .FileName = _store.FilePath,
-                .UseShellExecute = True
-            })
-        Catch ex As Exception
-            MessageBox.Show(Me, ex.Message, "Open Edit Log failed", MessageBoxButtons.OK, MessageBoxIcon.Error)
-        End Try
     End Sub
 End Class
 

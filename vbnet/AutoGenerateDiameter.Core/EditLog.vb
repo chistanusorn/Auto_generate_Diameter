@@ -76,6 +76,11 @@ Public NotInheritable Class EditLogStore
     End Function
 
     Public Sub ExportToXlsx(path As String)
+        ExportToXlsx(path, ReadAll())
+    End Sub
+
+    Public Sub ExportToXlsx(path As String, entries As IEnumerable(Of EditLogEntry))
+        Dim rows = If(entries Is Nothing, New List(Of EditLogEntry), entries.ToList())
         Using workbook As New XLWorkbook()
             Dim worksheet = workbook.Worksheets.Add("Edit Log")
             For column = 0 To Columns.Length - 1
@@ -84,7 +89,7 @@ Public NotInheritable Class EditLogStore
             worksheet.Row(1).Style.Font.Bold = True
 
             Dim rowNumber = 2
-            For Each entry In ReadAll()
+            For Each entry In rows
                 Dim values = Fields(entry)
                 For column = 0 To values.Length - 1
                     worksheet.Cell(rowNumber, column + 1).Value = values(column)
