@@ -23,6 +23,8 @@ Public NotInheritable Class ReportPreviewControl
     Private _panStartScreen As Point
     Private _panStartScroll As Point
 
+    Public Event CellDoubleClicked As EventHandler(Of ReportCellEventArgs)
+
     Public Sub New()
         DoubleBuffered = True
         BackColor = Color.White
@@ -106,15 +108,46 @@ Public NotInheritable Class ReportPreviewControl
         Cursor = Cursors.Hand
     End Sub
 
+    Protected Overrides Sub OnMouseDoubleClick(e As MouseEventArgs)
+        MyBase.OnMouseDoubleClick(e)
+        If e.Button <> MouseButtons.Left Then Return
+        Dim hit = HitTestCell(e.Location)
+        If hit Is Nothing Then Return
+        RaiseEvent CellDoubleClicked(Me, New ReportCellEventArgs(hit))
+    End Sub
+
     Protected Overrides Sub OnPaint(e As PaintEventArgs)
         MyBase.OnPaint(e)
         If _sheet Is Nothing Then Return
         e.Graphics.ScaleTransform(_scaleX, _scaleY)
-        e.Graphics.Clear(Color.White)
-        DrawHeader(e.Graphics)
-        DrawTrayBlock(e.Graphics, FirstTrayTop, 1)
-        DrawTrayBlock(e.Graphics, SecondTrayTop, 12)
-        DrawFooter(e.Graphics)
+        RenderSheet(e.Graphics, _sheet)
+    End Sub
+
+    Public Shared Sub RenderSheetToBounds(graphics As Graphics, sheet As SheetData, bounds As RectangleF)
+        If sheet Is Nothing Then Return
+        graphics.FillRectangle(Brushes.White, bounds)
+        Dim state As Drawing2D.GraphicsState = graphics.Save()
+        Try
+            Dim scale = Math.Min(bounds.Width / PageWidth, bounds.Height / PageHeight)
+            Dim renderWidth = PageWidth * scale
+            Dim renderHeight = PageHeight * scale
+            graphics.TranslateTransform(
+                bounds.Left + (bounds.Width - renderWidth) / 2.0F,
+                bounds.Top + (bounds.Height - renderHeight) / 2.0F
+            )
+            graphics.ScaleTransform(scale, scale)
+            RenderSheet(graphics, sheet)
+        Finally
+            graphics.Restore(state)
+        End Try
+    End Sub
+
+    Private Shared Sub RenderSheet(graphics As Graphics, sheet As SheetData)
+        graphics.Clear(Color.White)
+        DrawHeader(graphics, sheet)
+        DrawTrayBlock(graphics, sheet, FirstTrayTop, 1)
+        DrawTrayBlock(graphics, sheet, SecondTrayTop, 12)
+        DrawFooter(graphics, sheet)
     End Sub
 
     Private Sub UpdateSize()
@@ -134,23 +167,61 @@ Public NotInheritable Class ReportPreviewControl
         UpdateSize()
     End Sub
 
-    Private Sub DrawHeader(graphics As Graphics)
+    Private Function HitTestCell(location As Point) As ReportCellHit
+        If _sheet Is Nothing OrElse _scaleX <= 0 OrElse _scaleY <= 0 Then Return Nothing
+
+        Dim logicalX = location.X / _scaleX
+        Dim logicalY = location.Y / _scaleY
+        Dim firstPosition = 1
+        Dim top = FirstTrayTop
+
+        If logicalY >= SecondTrayTop AndAlso logicalY <= SecondTrayTop + TrayBlockHeight Then
+            firstPosition = 12
+            top = SecondTrayTop
+        ElseIf logicalY < FirstTrayTop OrElse logicalY > FirstTrayTop + TrayBlockHeight Then
+            Return Nothing
+        End If
+
+        Dim trayWidth = PageWidth / 11.0F
+        If logicalX < 0 OrElse logicalX > PageWidth Then Return Nothing
+        Dim column = Math.Min(10, CInt(Math.Floor(logicalX / trayWidth)))
+        Dim trayPosition = firstPosition + column
+        If trayPosition < 1 OrElse trayPosition > 22 Then Return Nothing
+
+        Dim dataTop = top + TrayHeaderHeight * 2
+        Dim rowHeight = (TrayBlockHeight - TrayHeaderHeight * 2) / 6.0F
+        If logicalY < dataTop OrElse logicalY > dataTop + rowHeight * 6 Then Return Nothing
+
+        Dim rowNumber = Math.Min(6, CInt(Math.Floor((logicalY - dataTop) / rowHeight)) + 1)
+        Dim left = column * trayWidth
+        Dim side = If(logicalX < left + trayWidth / 2.0F, "R", "L")
+        Dim trayLabel = ((_sheet.PageNumber - 1) * 22) + trayPosition
+
+        Return New ReportCellHit With {
+            .TrayPosition = trayPosition,
+            .TrayLabel = trayLabel,
+            .RowNumber = rowNumber,
+            .Side = side
+        }
+    End Function
+
+    Private Shared Sub DrawHeader(graphics As Graphics, sheet As SheetData)
         DrawLine(graphics, 0, 22, PageWidth, 22)
         DrawLine(graphics, 1165, 0, 1165, 22)
         DrawLine(graphics, 1385, 0, 1385, 22)
         DrawText(graphics, "PAGE NO", 1175, 11, 9, True, Color.Black, ContentAlignment.MiddleLeft)
-        DrawText(graphics, $"{_sheet.PageNumber}/{_sheet.TotalPages}", 1490, 11, 16, True, DataColor)
-        DrawField(graphics, "ITEM", _sheet.Item, 5, 72, 100, 26)
-        DrawField(graphics, "PLATE No.", _sheet.PlateNo, 455, 72, 655, 26)
+        DrawText(graphics, $"{sheet.PageNumber}/{sheet.TotalPages}", 1490, 11, 16, True, DataColor)
+        DrawField(graphics, "ITEM", sheet.Item, 5, 72, 100, 26)
+        DrawField(graphics, "PLATE No.", sheet.PlateNo, 455, 72, 655, 26)
         DrawText(graphics, "Longtail", 950, 72, 26, True, Color.Black, ContentAlignment.MiddleLeft)
         DrawText(graphics, "Delay", 1175, 72, 26, True, Color.Black, ContentAlignment.MiddleLeft)
-        DrawField(graphics, "DATETIME", _sheet.DateTimeStamp, 5, 127, 170, 22)
-        DrawField(graphics, "CAPA.", _sheet.Capa, 380, 127, 485, 22)
+        DrawField(graphics, "DATETIME", sheet.DateTimeStamp, 5, 127, 170, 22)
+        DrawField(graphics, "CAPA.", sheet.Capa, 380, 127, 485, 22)
         DrawText(graphics, "P'cs", 660, 127, 22, True, Color.Black, ContentAlignment.MiddleLeft)
-        DrawField(graphics, "DOME Type", _sheet.DomeType, 790, 127, 940, 18)
-        DrawText(graphics, _sheet.Longtail83, 1040, 127, 22, True, DataColor)
-        DrawText(graphics, _sheet.Longtail95, 1120, 127, 22, True, DataColor)
-        DrawField(graphics, "Coat Lot No.", _sheet.CoatLotNo, 1175, 127, 1325, 18)
+        DrawField(graphics, "DOME Type", sheet.DomeType, 790, 127, 940, 18)
+        DrawText(graphics, sheet.Longtail83, 1040, 127, 22, True, DataColor)
+        DrawText(graphics, sheet.Longtail95, 1120, 127, 22, True, DataColor)
+        DrawField(graphics, "Coat Lot No.", sheet.CoatLotNo, 1175, 127, 1325, 18)
         DrawLine(graphics, 0, HeaderBottom, PageWidth, HeaderBottom)
     End Sub
 
@@ -167,12 +238,12 @@ Public NotInheritable Class ReportPreviewControl
             String.IsNullOrWhiteSpace(_sheet.OperatorName)
     End Function
 
-    Private Sub DrawField(graphics As Graphics, label As String, value As String, labelX As Single, y As Single, valueX As Single, labelSize As Single)
+    Private Shared Sub DrawField(graphics As Graphics, label As String, value As String, labelX As Single, y As Single, valueX As Single, labelSize As Single)
         DrawText(graphics, label, labelX, y, labelSize, True, Color.Black, ContentAlignment.MiddleLeft)
         DrawText(graphics, value, valueX + 8, y + 3, 16, True, DataColor, ContentAlignment.MiddleLeft)
     End Sub
 
-    Private Sub DrawTrayBlock(graphics As Graphics, top As Integer, firstPosition As Integer)
+    Private Shared Sub DrawTrayBlock(graphics As Graphics, sheet As SheetData, top As Integer, firstPosition As Integer)
         Dim bottom = top + TrayBlockHeight
         Dim trayWidth = PageWidth / 11.0F
         Dim rowHeight = (TrayBlockHeight - TrayHeaderHeight * 2) / 6.0F
@@ -184,13 +255,13 @@ Public NotInheritable Class ReportPreviewControl
             Dim left = column * trayWidth
             Dim middle = left + trayWidth / 2
             Dim right = left + trayWidth
-            Dim measurements = _sheet.Measurements.Where(Function(item) item.TrayPosition = trayPosition).ToList()
+            Dim measurements = sheet.Measurements.Where(Function(item) item.TrayPosition = trayPosition).ToList()
             Dim lot = If(measurements.Count = 0, "", measurements(0).LotNumber)
             DrawLine(graphics, left, top, left, bottom)
             DrawLine(graphics, middle, top + TrayHeaderHeight, middle, bottom)
             DrawLine(graphics, left, top + TrayHeaderHeight, right, top + TrayHeaderHeight)
             DrawLine(graphics, left, top + TrayHeaderHeight * 2, right, top + TrayHeaderHeight * 2)
-            Dim trayLabel = ((_sheet.PageNumber - 1) * 22) + trayPosition
+            Dim trayLabel = ((sheet.PageNumber - 1) * 22) + trayPosition
             DrawText(graphics, $"T-{trayLabel}", left + 8, top + 12, 12, True, Color.Black, ContentAlignment.MiddleLeft)
             DrawText(graphics, lot, middle, top + 12, 14, True, DataColor)
             DrawText(graphics, "R", left + trayWidth * 0.25F, top + 36, 12, True, Color.Black)
@@ -228,10 +299,10 @@ Public NotInheritable Class ReportPreviewControl
         DrawText(graphics, "-", x, rowTop + rowHeight * 0.5F, 16, True, DataColor)
     End Sub
 
-    Private Sub DrawFooter(graphics As Graphics)
+    Private Shared Sub DrawFooter(graphics As Graphics, sheet As SheetData)
         DrawLine(graphics, 0, 1025, PageWidth, 1025)
         DrawText(graphics, "LENS TEST", 5, 1053, 18, True, Color.Black, ContentAlignment.MiddleLeft)
-        DrawText(graphics, $"Operator  {_sheet.OperatorName}", 1320, 1053, 22, True, DataColor, ContentAlignment.MiddleLeft)
+        DrawText(graphics, $"Operator  {sheet.OperatorName}", 1320, 1053, 22, True, DataColor, ContentAlignment.MiddleLeft)
     End Sub
 
     Private Shared Sub DrawLine(graphics As Graphics, x1 As Single, y1 As Single, x2 As Single, y2 As Single)
@@ -262,5 +333,22 @@ Public NotInheritable Class ReportPreviewControl
                 graphics.DrawString(text, font, brush, New PointF(x, y), format)
             End Using
         End Using
+    End Sub
+End Class
+
+Public NotInheritable Class ReportCellHit
+    Public Property TrayPosition As Integer
+    Public Property TrayLabel As Integer
+    Public Property RowNumber As Integer
+    Public Property Side As String = ""
+End Class
+
+Public NotInheritable Class ReportCellEventArgs
+    Inherits EventArgs
+
+    Public ReadOnly Property Hit As ReportCellHit
+
+    Public Sub New(hit As ReportCellHit)
+        Me.Hit = hit
     End Sub
 End Class

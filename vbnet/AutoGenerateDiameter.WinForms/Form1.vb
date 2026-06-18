@@ -8,13 +8,10 @@ Imports System.Text
 Public Partial Class Form1
     Private ReadOnly _preview As New ReportPreviewControl()
     Private ReadOnly _status As New ToolStripStatusLabel("Ready")
-    Private ReadOnly _compareStatus As New ToolStripStatusLabel("Manual Compare: NOT RUN")
     Private ReadOnly _pageStatus As New ToolStripStatusLabel()
     Private ReadOnly _previous As New Button()
     Private ReadOnly _next As New Button()
-    Private ReadOnly _resumeCompare As New Button()
     Private _report As ImportedReport = EmptyReportFactory.Create()
-    Private _manualCompareResult As CompareResult
     Private _pageIndex As Integer
     Private _operatorName As String = ""
     Private _startTrayPosition As Integer = 1
@@ -44,16 +41,10 @@ Public Partial Class Form1
         })
         toolbar.Controls.Add(ActionButton("Load Database", AddressOf LoadDatabase))
         toolbar.Controls.Add(ActionButton("Import XLSX", AddressOf ImportXlsx))
-        toolbar.Controls.Add(ActionButton("Import Manual Image", AddressOf ImportManualImage))
         toolbar.Controls.Add(ActionButton("Edit Header", AddressOf EditHeader))
         toolbar.Controls.Add(ActionButton("Adjust Start T", AddressOf AdjustStartTray))
         toolbar.Controls.Add(ActionButton("Export CSV", AddressOf ExportCsv))
-        toolbar.Controls.Add(ActionButton("Compare Manual", AddressOf CompareManual))
-        _resumeCompare.Text = "Resume Compare"
-        ConfigureButton(_resumeCompare)
-        _resumeCompare.Enabled = False
-        AddHandler _resumeCompare.Click, AddressOf ResumeManualCompare
-        toolbar.Controls.Add(_resumeCompare)
+        toolbar.Controls.Add(ActionButton("Open Edit Log", AddressOf OpenEditLog))
 
         _previous.Text = "< Previous"
         ConfigureButton(_previous)
@@ -72,6 +63,7 @@ Public Partial Class Form1
             .Padding = New Padding(12)
         }
         viewport.Controls.Add(_preview)
+        AddHandler _preview.CellDoubleClicked, AddressOf EditReportCell
 
         Dim statusBar = New StatusStrip With {.BackColor = Color.FromArgb(23, 32, 51)}
         _status.ForeColor = Color.White
@@ -80,10 +72,7 @@ Public Partial Class Form1
         _pageStatus.Spring = True
         _pageStatus.TextAlign = ContentAlignment.MiddleRight
         statusBar.Items.Add(_status)
-        statusBar.Items.Add(New ToolStripStatusLabel("Wheel: Zoom | Left drag: Pan") With {.ForeColor = Color.Gainsboro})
-        _compareStatus.ForeColor = Color.Gold
-        _compareStatus.Font = New Font("Segoe UI", 9, FontStyle.Bold)
-        statusBar.Items.Add(_compareStatus)
+        statusBar.Items.Add(New ToolStripStatusLabel("Wheel: Zoom | Left drag: Pan | Double-click cell: Edit") With {.ForeColor = Color.Gainsboro})
         statusBar.Items.Add(_pageStatus)
 
         Controls.Add(viewport)
@@ -102,52 +91,6 @@ Public Partial Class Form1
             _startTrayPosition = dialog.StartTrayPositionValue
             ApplyReportDefaults()
             ShowPage("Operator ready")
-        End Using
-    End Sub
-
-    Private Sub ImportManualImage(sender As Object, eventArgs As EventArgs)
-        Using fileDialog As New OpenFileDialog With {
-            .Title = "Import data from manual sheet image",
-            .Filter = "Image files|*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff"
-        }
-            If fileDialog.ShowDialog(Me) <> DialogResult.OK Then Return
-            Try
-                _status.Text = $"Reading {IO.Path.GetFileName(fileDialog.FileName)}..."
-                Application.DoEvents()
-                Dim service As New ManualImageImportService()
-                Dim result = service.ReadImage(fileDialog.FileName)
-                Using review As New ManualImageImportDialog(result)
-                    If review.ShowDialog(Me) <> DialogResult.OK Then
-                        _status.Text = "Manual image import cancelled"
-                        Return
-                    End If
-                    _report = service.BuildReport(
-                        result.Rows,
-                        "",
-                        "",
-                        "",
-                        "",
-                        "",
-                        "",
-                        0,
-                        0
-                    )
-                End Using
-                ApplyReportDefaults(repositionData:=False)
-                ResetManualCompare()
-                _pageIndex = 0
-                ShowPage("Manual image imported")
-                MessageBox.Show(
-                    Me,
-                    $"Imported {_report.MeasurementCount} rows from manual image. Review OCR values before use.",
-                    "Import Manual Image complete",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information
-                )
-            Catch ex As Exception
-                _status.Text = "Manual image import failed"
-                MessageBox.Show(Me, ex.Message, "Import Manual Image failed", MessageBoxButtons.OK, MessageBoxIcon.Error)
-            End Try
         End Using
     End Sub
 
@@ -181,7 +124,6 @@ Public Partial Class Form1
 
     Private Sub ChangePage(offset As Integer)
         _pageIndex += offset
-        ResetManualCompare()
         ShowPage()
     End Sub
 
@@ -196,7 +138,6 @@ Public Partial Class Form1
                 Application.DoEvents()
                 _report = New XlsxReportImporter().Import(dialog.FileName)
                 ApplyReportDefaults()
-                ResetManualCompare()
                 _pageIndex = 0
                 ShowPage("XLSX imported")
                 MessageBox.Show(
@@ -221,7 +162,6 @@ Public Partial Class Form1
                 Application.DoEvents()
                 _report = Await New MySqlReportLoader().LoadAsync(dialog.Settings, dialog.ProductionPlaceCode, dialog.CoatLotNumber)
                 ApplyReportDefaults()
-                ResetManualCompare()
                 _pageIndex = 0
                 ShowPage("Database loaded")
                 MessageBox.Show(
@@ -256,7 +196,6 @@ Public Partial Class Form1
             Next
             _operatorName = dialog.OperatorValue
             _startTrayPosition = dialog.StartTrayPositionValue
-            ResetManualCompare()
             ShowPage("Header updated")
         End Using
     End Sub
@@ -269,7 +208,6 @@ Public Partial Class Form1
                 sheet.StartTrayPosition = dialog.StartTrayPositionValue
             Next
             _startTrayPosition = dialog.StartTrayPositionValue
-            ResetManualCompare()
             ShowPage($"Data starts at T-{_startTrayPosition}")
         End Using
     End Sub
@@ -295,6 +233,157 @@ Public Partial Class Form1
             End Try
         End Using
     End Sub
+
+    Private Sub EditReportCell(sender As Object, eventArgs As ReportCellEventArgs)
+        If _report.Sheets.Count = 0 Then Return
+        Dim sheet = _report.Sheets(_pageIndex)
+        Dim measurement = sheet.Measurements.FirstOrDefault(
+            Function(item) item.TrayPosition = eventArgs.Hit.TrayPosition AndAlso item.RowNumber = eventArgs.Hit.RowNumber
+        )
+        Dim before = SnapshotCell(measurement, eventArgs.Hit.Side)
+
+        Using dialog As New CellEditDialog(eventArgs.Hit, measurement)
+            If dialog.ShowDialog(Me) <> DialogResult.OK Then Return
+            If measurement Is Nothing Then
+                measurement = New Measurement With {
+                    .TrayPosition = eventArgs.Hit.TrayPosition,
+                    .RowNumber = eventArgs.Hit.RowNumber
+                }
+                sheet.Measurements.Add(measurement)
+            End If
+
+            measurement.LotNumber = dialog.LotNumberValue
+            measurement.TrayNumber = dialog.TrayNumberValue
+            ApplyCellEdit(measurement, eventArgs.Hit.Side, dialog.DisplayModeValue, dialog.DiameterValue)
+
+            Dim after = SnapshotCell(measurement, eventArgs.Hit.Side)
+            If IsEmptyMeasurement(measurement) Then sheet.Measurements.Remove(measurement)
+            sheet.Measurements = sheet.Measurements.
+                OrderBy(Function(item) item.TrayPosition).
+                ThenBy(Function(item) item.RowNumber).
+                ToList()
+
+            If Not before.HasSameValue(after) Then AppendEditLog(sheet, eventArgs.Hit, before, after)
+            ShowPage($"Edited T-{eventArgs.Hit.TrayLabel} Row {eventArgs.Hit.RowNumber} {eventArgs.Hit.Side}")
+        End Using
+    End Sub
+
+    Private Shared Sub ApplyCellEdit(measurement As Measurement, side As String, displayMode As String, diameter As Double)
+        Dim isValue = displayMode = "Value"
+        Dim isDash = displayMode = "Dash (-)"
+        If side = "R" Then
+            measurement.RPresent = isValue
+            measurement.RDash = isDash
+            measurement.RDiameter = If(isValue, diameter, 0)
+            Return
+        End If
+        measurement.LPresent = isValue
+        measurement.LDash = isDash
+        measurement.LDiameter = If(isValue, diameter, 0)
+    End Sub
+
+    Private Shared Function IsEmptyMeasurement(measurement As Measurement) As Boolean
+        Return Not measurement.RPresent AndAlso
+            Not measurement.LPresent AndAlso
+            Not measurement.RDash AndAlso
+            Not measurement.LDash AndAlso
+            String.IsNullOrWhiteSpace(measurement.TrayNumber) AndAlso
+            String.IsNullOrWhiteSpace(measurement.LotNumber)
+    End Function
+
+    Private Shared Function SnapshotCell(measurement As Measurement, side As String) As CellSnapshot
+        If measurement Is Nothing Then Return New CellSnapshot()
+
+        Dim present = If(side = "R", measurement.RPresent, measurement.LPresent)
+        Dim dash = If(side = "R", measurement.RDash, measurement.LDash)
+        Dim diameter = If(side = "R", measurement.RDiameter, measurement.LDiameter)
+        Dim displayMode = If(dash, "Dash (-)", If(present, "Value", "Blank"))
+        Dim diameterText = If(present, Math.Round(diameter).ToString(CultureInfo.InvariantCulture), "")
+        Dim displayText = If(dash, "-", diameterText)
+
+        Return New CellSnapshot With {
+            .DisplayMode = displayMode,
+            .DisplayText = displayText,
+            .DiameterText = diameterText,
+            .TrayNumber = measurement.TrayNumber,
+            .LotNumber = measurement.LotNumber
+        }
+    End Function
+
+    Private Sub AppendEditLog(sheet As SheetData, hit As ReportCellHit, before As CellSnapshot, after As CellSnapshot)
+        Dim path = EditLogPath()
+        Dim exists = IO.File.Exists(path)
+        Using writer As New IO.StreamWriter(path, True, New UTF8Encoding(True))
+            If Not exists Then
+                writer.WriteLine(String.Join(",", {
+                    "Timestamp",
+                    "Operator",
+                    "Page",
+                    "TLabel",
+                    "TPosition",
+                    "Row",
+                    "Side",
+                    "BeforeMode",
+                    "AfterMode",
+                    "BeforeDisplay",
+                    "AfterDisplay",
+                    "BeforeDiameter",
+                    "AfterDiameter",
+                    "BeforeTrayNumber",
+                    "AfterTrayNumber",
+                    "BeforeDipLot",
+                    "AfterDipLot"
+                }.Select(AddressOf Csv)))
+            End If
+
+            Dim values = {
+                Date.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+                sheet.OperatorName,
+                sheet.PageNumber.ToString(CultureInfo.InvariantCulture),
+                $"T-{hit.TrayLabel}",
+                hit.TrayPosition.ToString(CultureInfo.InvariantCulture),
+                hit.RowNumber.ToString(CultureInfo.InvariantCulture),
+                hit.Side,
+                before.DisplayMode,
+                after.DisplayMode,
+                before.DisplayText,
+                after.DisplayText,
+                before.DiameterText,
+                after.DiameterText,
+                before.TrayNumber,
+                after.TrayNumber,
+                before.LotNumber,
+                after.LotNumber
+            }
+            writer.WriteLine(String.Join(",", values.Select(AddressOf Csv)))
+        End Using
+    End Sub
+
+    Private Sub OpenEditLog(sender As Object, eventArgs As EventArgs)
+        Dim path = EditLogPath()
+        If Not IO.File.Exists(path) Then
+            MessageBox.Show(Me, $"No edit log found yet.{Environment.NewLine}{path}", "Edit Log", MessageBoxButtons.OK, MessageBoxIcon.Information)
+            Return
+        End If
+        Try
+            Diagnostics.Process.Start(New Diagnostics.ProcessStartInfo With {
+                .FileName = path,
+                .UseShellExecute = True
+            })
+        Catch ex As Exception
+            MessageBox.Show(Me, ex.Message, "Open Edit Log failed", MessageBoxButtons.OK, MessageBoxIcon.Error)
+        End Try
+    End Sub
+
+    Private Shared Function EditLogPath() As String
+        Dim directory = IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "AutoGenerateDiameter",
+            "logs"
+        )
+        IO.Directory.CreateDirectory(directory)
+        Return IO.Path.Combine(directory, "edit-log.csv")
+    End Function
 
     Private Function BuildCsv() As String
         Dim lines As New List(Of String) From {
@@ -428,110 +517,23 @@ Public Partial Class Form1
         }
     End Function
 
-    Private Sub CompareManual(sender As Object, eventArgs As EventArgs)
-        Using dialog As New OpenFileDialog With {
-            .Title = "Compare manual sheet image",
-            .Filter = "Image files|*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff"
-        }
-            If dialog.ShowDialog(Me) <> DialogResult.OK Then Return
-            Dim preparedImagePath As String = ""
-            Dim ocrImagePath As String = ""
-            Try
-                Using alignmentDialog As New ManualImageAlignmentDialog(dialog.FileName)
-                    If alignmentDialog.ShowDialog(Me) <> DialogResult.OK Then Return
-                    preparedImagePath = alignmentDialog.ResultImagePath
-                    _status.Text = $"Preprocessing {IO.Path.GetFileName(dialog.FileName)}..."
-                    Application.DoEvents()
-                    ocrImagePath = ImagePreprocessor.Preprocess(preparedImagePath)
-                    _status.Text = $"Comparing {IO.Path.GetFileName(dialog.FileName)}..."
-                    Application.DoEvents()
-
-                    Dim service As New ManualCompareService()
-                    Dim result As CompareResult
-                    ' Cell-level OCR only makes sense when the table geometry is reliable, i.e. the
-                    ' user perspective-aligned or cropped the frame (temp file prefixed "-aligned-").
-                    ' For an unaligned original photo, fall back to whole-image OCR.
-                    If IsAlignedImage(preparedImagePath) Then
-                        Dim cropSource = preparedImagePath
-                        result = service.CompareImageByCell(
-                            ocrImagePath,
-                            _report.Sheets(_pageIndex),
-                            Function(region) ImagePreprocessor.ExtractCell(cropSource, region))
-                    Else
-                        result = service.CompareImage(ocrImagePath, _report.Sheets(_pageIndex))
-                    End If
-                    result.ImagePath = preparedImagePath
-                    DeleteTemporaryImage(ocrImagePath)
-                    ocrImagePath = ""
-                    ResetManualCompare()
-                    _manualCompareResult = result
-                    OpenManualCompareResult()
-                End Using
-            Catch ex As Exception
-                DeleteTemporaryImage(ocrImagePath)
-                DeleteTemporaryImage(preparedImagePath)
-                _status.Text = "Manual comparison failed"
-                MessageBox.Show(Me, ex.Message, "Manual comparison failed", MessageBoxButtons.OK, MessageBoxIcon.Error)
-            End Try
-        End Using
-    End Sub
-
-    Private Sub ResetManualCompare()
-        DeleteTemporaryCompareImage()
-        _manualCompareResult = Nothing
-        UpdateManualCompareBadge()
-    End Sub
-
-    Private Sub DeleteTemporaryCompareImage()
-        If _manualCompareResult Is Nothing OrElse String.IsNullOrWhiteSpace(_manualCompareResult.ImagePath) Then Return
-        DeleteTemporaryImage(_manualCompareResult.ImagePath)
-    End Sub
-
-    Private Shared Function IsAlignedImage(path As String) As Boolean
-        If String.IsNullOrWhiteSpace(path) Then Return False
-        Return IO.Path.GetFileName(path).StartsWith("AutoGenerateDiameter-aligned-", StringComparison.OrdinalIgnoreCase)
-    End Function
-
-    Private Shared Sub DeleteTemporaryImage(path As String)
-        If String.IsNullOrWhiteSpace(path) Then Return
-        Dim fileName = IO.Path.GetFileName(path)
-        If Not (fileName.StartsWith("AutoGenerateDiameter-aligned-", StringComparison.OrdinalIgnoreCase) OrElse
-                fileName.StartsWith("AutoGenerateDiameter-ocr-", StringComparison.OrdinalIgnoreCase)) Then Return
-        Try
-            If IO.File.Exists(path) Then IO.File.Delete(path)
-        Catch
-            ' A temporary preview file can remain if another control still has it open.
-        End Try
-    End Sub
-
-    Private Sub ResumeManualCompare(sender As Object, eventArgs As EventArgs)
-        If _manualCompareResult Is Nothing Then Return
-        OpenManualCompareResult()
-    End Sub
-
-    Private Sub OpenManualCompareResult()
-        Using resultDialog As New ManualCompareDialog(_manualCompareResult)
-            resultDialog.ShowDialog(Me)
-        End Using
-        UpdateManualCompareBadge()
-        _status.Text = If(_manualCompareResult.Verified, "Manual comparison verified", "Manual comparison saved in session with pending items")
-    End Sub
-
-    Private Sub UpdateManualCompareBadge()
-        _resumeCompare.Enabled = _manualCompareResult IsNot Nothing
-        If _manualCompareResult Is Nothing Then
-            _compareStatus.Text = "Manual Compare: NOT RUN"
-            _compareStatus.ForeColor = Color.Gold
-        ElseIf _manualCompareResult.Verified Then
-            _compareStatus.Text = $"Manual Compare: VERIFIED | OCR Match: {_manualCompareResult.FoundCount} | Manual Confirmed: {_manualCompareResult.ManuallyConfirmedCount}"
-            _compareStatus.ForeColor = Color.LightGreen
-        Else
-            _compareStatus.Text = $"Manual Compare: REVIEW REQUIRED | Pending: {_manualCompareResult.PendingCount}"
-            _compareStatus.ForeColor = Color.OrangeRed
-        End If
-    End Sub
-
     Private Function CanExportOrPrint() As Boolean
         Return True
     End Function
+
+    Private NotInheritable Class CellSnapshot
+        Public Property DisplayMode As String = "Blank"
+        Public Property DisplayText As String = ""
+        Public Property DiameterText As String = ""
+        Public Property TrayNumber As String = ""
+        Public Property LotNumber As String = ""
+
+        Public Function HasSameValue(other As CellSnapshot) As Boolean
+            Return DisplayMode = other.DisplayMode AndAlso
+                DisplayText = other.DisplayText AndAlso
+                DiameterText = other.DiameterText AndAlso
+                TrayNumber = other.TrayNumber AndAlso
+                LotNumber = other.LotNumber
+        End Function
+    End Class
 End Class
