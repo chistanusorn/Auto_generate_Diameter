@@ -15,6 +15,7 @@ Public Partial Class Form1
     Private _pageIndex As Integer
     Private _operatorName As String = ""
     Private _startTrayPosition As Integer = 1
+    Private ReadOnly _editLog As New EditLogStore(EditLogPath())
 
     Public Sub New()
         InitializeComponent()
@@ -44,7 +45,7 @@ Public Partial Class Form1
         toolbar.Controls.Add(ActionButton("Edit Header", AddressOf EditHeader))
         toolbar.Controls.Add(ActionButton("Adjust Start T", AddressOf AdjustStartTray))
         toolbar.Controls.Add(ActionButton("Export CSV", AddressOf ExportCsv))
-        toolbar.Controls.Add(ActionButton("Open Edit Log", AddressOf OpenEditLog))
+        toolbar.Controls.Add(ActionButton("View Edit Log", AddressOf OpenEditLog))
 
         _previous.Text = "< Previous"
         ConfigureButton(_previous)
@@ -64,6 +65,9 @@ Public Partial Class Form1
         }
         viewport.Controls.Add(_preview)
         AddHandler _preview.CellDoubleClicked, AddressOf EditReportCell
+        AddHandler _preview.TrayHeaderDoubleClicked, AddressOf EditTrayLot
+        AddHandler _preview.HeaderDoubleClicked, Sub() EditHeader(Me, EventArgs.Empty)
+        AddHandler _preview.OperatorDoubleClicked, AddressOf EditOperator
 
         Dim statusBar = New StatusStrip With {.BackColor = Color.FromArgb(23, 32, 51)}
         _status.ForeColor = Color.White
@@ -72,7 +76,7 @@ Public Partial Class Form1
         _pageStatus.Spring = True
         _pageStatus.TextAlign = ContentAlignment.MiddleRight
         statusBar.Items.Add(_status)
-        statusBar.Items.Add(New ToolStripStatusLabel("Wheel: Zoom | Left drag: Pan | Double-click cell: Edit") With {.ForeColor = Color.Gainsboro})
+        statusBar.Items.Add(New ToolStripStatusLabel("Wheel: Zoom | Left drag: Pan | Double-click: cell / T-* lot / header / operator to edit") With {.ForeColor = Color.Gainsboro})
         statusBar.Items.Add(_pageStatus)
 
         Controls.Add(viewport)
@@ -181,6 +185,7 @@ Public Partial Class Form1
     Private Sub EditHeader(sender As Object, eventArgs As EventArgs)
         Using dialog As New HeaderEditDialog(_report.Sheets(_pageIndex))
             If dialog.ShowDialog(Me) <> DialogResult.OK Then Return
+            LogHeaderEdit(_report.Sheets(_pageIndex), dialog)
             RepositionReportData(dialog.StartTrayPositionValue)
             For Each sheet In _report.Sheets
                 sheet.Item = dialog.ItemValue
@@ -263,8 +268,54 @@ Public Partial Class Form1
                 ThenBy(Function(item) item.RowNumber).
                 ToList()
 
-            If Not before.HasSameValue(after) Then AppendEditLog(sheet, eventArgs.Hit, before, after)
+            LogCellEdit(eventArgs.Hit, before, after)
             ShowPage($"Edited T-{eventArgs.Hit.TrayLabel} Row {eventArgs.Hit.RowNumber} {eventArgs.Hit.Side}")
+        End Using
+    End Sub
+
+    Private Sub EditTrayLot(sender As Object, eventArgs As ReportCellEventArgs)
+        If _report.Sheets.Count = 0 Then Return
+        Dim sheet = _report.Sheets(_pageIndex)
+        Dim measurements = sheet.Measurements.
+            Where(Function(item) item.TrayPosition = eventArgs.Hit.TrayPosition).
+            ToList()
+
+        If measurements.Count = 0 Then
+            MessageBox.Show(
+                Me,
+                $"T-{eventArgs.Hit.TrayLabel} has no data yet, so there is no Dip Lot to edit.",
+                "Edit Dip Lot",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information
+            )
+            Return
+        End If
+
+        Dim before = measurements(0).LotNumber
+        Using dialog As New TrayLotEditDialog(eventArgs.Hit.TrayLabel, before)
+            If dialog.ShowDialog(Me) <> DialogResult.OK Then Return
+            For Each measurement In measurements
+                measurement.LotNumber = dialog.LotNumberValue
+            Next
+            Dim entries As New List(Of EditLogEntry)
+            AddEntry(entries, $"T-{eventArgs.Hit.TrayLabel}", "Dip Lot", before, dialog.LotNumberValue)
+            _editLog.Append(entries)
+            ShowPage($"Updated Dip Lot for T-{eventArgs.Hit.TrayLabel}")
+        End Using
+    End Sub
+
+    Private Sub EditOperator(sender As Object, eventArgs As EventArgs)
+        If _report.Sheets.Count = 0 Then Return
+        Using dialog As New OperatorEditDialog(_operatorName)
+            If dialog.ShowDialog(Me) <> DialogResult.OK Then Return
+            Dim entries As New List(Of EditLogEntry)
+            AddEntry(entries, "Operator", "Operator", _operatorName, dialog.OperatorNameValue)
+            _editLog.Append(entries)
+            _operatorName = dialog.OperatorNameValue
+            For Each sheet In _report.Sheets
+                sheet.OperatorName = _operatorName
+            Next
+            ShowPage("Operator updated")
         End Using
     End Sub
 
@@ -310,69 +361,50 @@ Public Partial Class Form1
         }
     End Function
 
-    Private Sub AppendEditLog(sheet As SheetData, hit As ReportCellHit, before As CellSnapshot, after As CellSnapshot)
-        Dim path = EditLogPath()
-        Dim exists = IO.File.Exists(path)
-        Using writer As New IO.StreamWriter(path, True, New UTF8Encoding(True))
-            If Not exists Then
-                writer.WriteLine(String.Join(",", {
-                    "Timestamp",
-                    "Operator",
-                    "Page",
-                    "TLabel",
-                    "TPosition",
-                    "Row",
-                    "Side",
-                    "BeforeMode",
-                    "AfterMode",
-                    "BeforeDisplay",
-                    "AfterDisplay",
-                    "BeforeDiameter",
-                    "AfterDiameter",
-                    "BeforeTrayNumber",
-                    "AfterTrayNumber",
-                    "BeforeDipLot",
-                    "AfterDipLot"
-                }.Select(AddressOf Csv)))
-            End If
+    Private Sub LogCellEdit(hit As ReportCellHit, before As CellSnapshot, after As CellSnapshot)
+        Dim target = $"T-{hit.TrayLabel} Row {hit.RowNumber} {hit.Side}"
+        Dim entries As New List(Of EditLogEntry)
+        AddEntry(entries, target, "Value", before.DisplayText, after.DisplayText)
+        AddEntry(entries, target, "Tray Number", before.TrayNumber, after.TrayNumber)
+        AddEntry(entries, target, "Dip Lot", before.LotNumber, after.LotNumber)
+        _editLog.Append(entries)
+    End Sub
 
-            Dim values = {
-                Date.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
-                sheet.OperatorName,
-                sheet.PageNumber.ToString(CultureInfo.InvariantCulture),
-                $"T-{hit.TrayLabel}",
-                hit.TrayPosition.ToString(CultureInfo.InvariantCulture),
-                hit.RowNumber.ToString(CultureInfo.InvariantCulture),
-                hit.Side,
-                before.DisplayMode,
-                after.DisplayMode,
-                before.DisplayText,
-                after.DisplayText,
-                before.DiameterText,
-                after.DiameterText,
-                before.TrayNumber,
-                after.TrayNumber,
-                before.LotNumber,
-                after.LotNumber
-            }
-            writer.WriteLine(String.Join(",", values.Select(AddressOf Csv)))
-        End Using
+    Private Sub LogHeaderEdit(sheet As SheetData, dialog As HeaderEditDialog)
+        Dim entries As New List(Of EditLogEntry)
+        AddEntry(entries, "Header", "ITEM", sheet.Item, dialog.ItemValue)
+        AddEntry(entries, "Header", "PLATE No.", sheet.PlateNo, dialog.PlateNoValue)
+        AddEntry(entries, "Header", "DATETIME", sheet.DateTimeStamp, dialog.DateTimeValue)
+        AddEntry(entries, "Header", "CAPA.", sheet.Capa, dialog.CapaValue)
+        AddEntry(entries, "Header", "DOME Type", sheet.DomeType, dialog.DomeTypeValue)
+        AddEntry(entries, "Header", "Longtail 83", sheet.Longtail83, dialog.Longtail83Value)
+        AddEntry(entries, "Header", "Longtail 95", sheet.Longtail95, dialog.Longtail95Value)
+        AddEntry(entries, "Header", "Coat Lot No.", sheet.CoatLotNo, dialog.CoatLotValue)
+        AddEntry(entries, "Header", "Operator", sheet.OperatorName, dialog.OperatorValue)
+        AddEntry(entries, "Header", "Start T-*",
+            sheet.StartTrayPosition.ToString(CultureInfo.InvariantCulture),
+            dialog.StartTrayPositionValue.ToString(CultureInfo.InvariantCulture))
+        _editLog.Append(entries)
+    End Sub
+
+    Private Sub AddEntry(entries As List(Of EditLogEntry), target As String, field As String, oldValue As String, newValue As String)
+        Dim previous = If(oldValue, "")
+        Dim current = If(newValue, "")
+        If String.Equals(previous, current, StringComparison.Ordinal) Then Return
+        entries.Add(New EditLogEntry With {
+            .Timestamp = Date.Now,
+            .OperatorName = _operatorName,
+            .Target = target,
+            .Field = field,
+            .OldValue = previous,
+            .NewValue = current
+        })
     End Sub
 
     Private Sub OpenEditLog(sender As Object, eventArgs As EventArgs)
-        Dim path = EditLogPath()
-        If Not IO.File.Exists(path) Then
-            MessageBox.Show(Me, $"No edit log found yet.{Environment.NewLine}{path}", "Edit Log", MessageBoxButtons.OK, MessageBoxIcon.Information)
-            Return
-        End If
-        Try
-            Diagnostics.Process.Start(New Diagnostics.ProcessStartInfo With {
-                .FileName = path,
-                .UseShellExecute = True
-            })
-        Catch ex As Exception
-            MessageBox.Show(Me, ex.Message, "Open Edit Log failed", MessageBoxButtons.OK, MessageBoxIcon.Error)
-        End Try
+        Using dialog As New EditLogViewerDialog(_editLog)
+            dialog.ShowDialog(Me)
+        End Using
     End Sub
 
     Private Shared Function EditLogPath() As String
@@ -382,7 +414,7 @@ Public Partial Class Form1
             "logs"
         )
         IO.Directory.CreateDirectory(directory)
-        Return IO.Path.Combine(directory, "edit-log.csv")
+        Return IO.Path.Combine(directory, "edit-history.csv")
     End Function
 
     Private Function BuildCsv() As String

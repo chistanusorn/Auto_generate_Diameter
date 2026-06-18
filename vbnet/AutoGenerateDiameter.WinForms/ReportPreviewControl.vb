@@ -24,6 +24,9 @@ Public NotInheritable Class ReportPreviewControl
     Private _panStartScroll As Point
 
     Public Event CellDoubleClicked As EventHandler(Of ReportCellEventArgs)
+    Public Event TrayHeaderDoubleClicked As EventHandler(Of ReportCellEventArgs)
+    Public Event HeaderDoubleClicked As EventHandler
+    Public Event OperatorDoubleClicked As EventHandler
 
     Public Sub New()
         DoubleBuffered = True
@@ -111,9 +114,27 @@ Public NotInheritable Class ReportPreviewControl
     Protected Overrides Sub OnMouseDoubleClick(e As MouseEventArgs)
         MyBase.OnMouseDoubleClick(e)
         If e.Button <> MouseButtons.Left Then Return
-        Dim hit = HitTestCell(e.Location)
-        If hit Is Nothing Then Return
-        RaiseEvent CellDoubleClicked(Me, New ReportCellEventArgs(hit))
+
+        Dim cell = HitTestCell(e.Location)
+        If cell IsNot Nothing Then
+            RaiseEvent CellDoubleClicked(Me, New ReportCellEventArgs(cell))
+            Return
+        End If
+
+        Dim trayHeader = HitTestTrayHeader(e.Location)
+        If trayHeader IsNot Nothing Then
+            RaiseEvent TrayHeaderDoubleClicked(Me, New ReportCellEventArgs(trayHeader))
+            Return
+        End If
+
+        If IsHeaderRegion(e.Location) Then
+            RaiseEvent HeaderDoubleClicked(Me, EventArgs.Empty)
+            Return
+        End If
+
+        If IsOperatorRegion(e.Location) Then
+            RaiseEvent OperatorDoubleClicked(Me, EventArgs.Empty)
+        End If
     End Sub
 
     Protected Overrides Sub OnPaint(e As PaintEventArgs)
@@ -203,6 +224,55 @@ Public NotInheritable Class ReportPreviewControl
             .RowNumber = rowNumber,
             .Side = side
         }
+    End Function
+
+    ' The "T-{label}  {lot}" strip drawn at the top of each tray block. Double-clicking
+    ' it lets the operator edit the number printed after T-* (the Dip Lot).
+    Private Function HitTestTrayHeader(location As Point) As ReportCellHit
+        If _sheet Is Nothing OrElse _scaleX <= 0 OrElse _scaleY <= 0 Then Return Nothing
+
+        Dim logicalX = location.X / _scaleX
+        Dim logicalY = location.Y / _scaleY
+        Dim firstPosition = 1
+        Dim top = FirstTrayTop
+
+        If logicalY >= SecondTrayTop AndAlso logicalY <= SecondTrayTop + TrayBlockHeight Then
+            firstPosition = 12
+            top = SecondTrayTop
+        ElseIf logicalY < FirstTrayTop OrElse logicalY > FirstTrayTop + TrayBlockHeight Then
+            Return Nothing
+        End If
+
+        ' Only the first header sub-row (where T-label and lot are printed) counts.
+        If logicalY < top OrElse logicalY > top + TrayHeaderHeight Then Return Nothing
+
+        Dim trayWidth = PageWidth / 11.0F
+        If logicalX < 0 OrElse logicalX > PageWidth Then Return Nothing
+        Dim column = Math.Min(10, CInt(Math.Floor(logicalX / trayWidth)))
+        Dim trayPosition = firstPosition + column
+        If trayPosition < 1 OrElse trayPosition > 22 Then Return Nothing
+        Dim trayLabel = ((_sheet.PageNumber - 1) * 22) + trayPosition
+
+        Return New ReportCellHit With {
+            .TrayPosition = trayPosition,
+            .TrayLabel = trayLabel,
+            .RowNumber = 0,
+            .Side = ""
+        }
+    End Function
+
+    Private Function IsHeaderRegion(location As Point) As Boolean
+        If _sheet Is Nothing OrElse _scaleX <= 0 OrElse _scaleY <= 0 Then Return False
+        Dim logicalX = location.X / _scaleX
+        Dim logicalY = location.Y / _scaleY
+        Return logicalY >= 0 AndAlso logicalY <= HeaderBottom AndAlso logicalX >= 0 AndAlso logicalX <= PageWidth
+    End Function
+
+    Private Function IsOperatorRegion(location As Point) As Boolean
+        If _sheet Is Nothing OrElse _scaleX <= 0 OrElse _scaleY <= 0 Then Return False
+        Dim logicalX = location.X / _scaleX
+        Dim logicalY = location.Y / _scaleY
+        Return logicalY >= 1025 AndAlso logicalY <= PageHeight AndAlso logicalX >= 1300 AndAlso logicalX <= PageWidth
     End Function
 
     Private Shared Sub DrawHeader(graphics As Graphics, sheet As SheetData)

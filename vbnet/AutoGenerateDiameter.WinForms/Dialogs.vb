@@ -322,6 +322,102 @@ Public NotInheritable Class StartTrayDialog
     End Sub
 End Class
 
+Public NotInheritable Class TrayLotEditDialog
+    Inherits Form
+
+    Private ReadOnly _lot As New TextBox()
+
+    Public ReadOnly Property LotNumberValue As String
+        Get
+            Return _lot.Text.Trim()
+        End Get
+    End Property
+
+    Public Sub New(trayLabel As Integer, currentLot As String)
+        Text = $"Edit T-{trayLabel} Dip Lot"
+        StartPosition = FormStartPosition.CenterParent
+        FormBorderStyle = FormBorderStyle.FixedDialog
+        MaximizeBox = False
+        MinimizeBox = False
+        ClientSize = New Size(380, 150)
+
+        Dim layout As New TableLayoutPanel With {.Dock = DockStyle.Fill, .Padding = New Padding(16), .ColumnCount = 2, .RowCount = 3}
+        layout.ColumnStyles.Add(New ColumnStyle(SizeType.Absolute, 120))
+        layout.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100))
+        Controls.Add(layout)
+
+        Dim heading As New Label With {
+            .Text = $"T-{trayLabel}",
+            .AutoSize = True,
+            .Font = New Font("Segoe UI", 11, FontStyle.Bold)
+        }
+        layout.Controls.Add(heading, 0, 0)
+        layout.SetColumnSpan(heading, 2)
+
+        layout.Controls.Add(New Label With {.Text = "Dip Lot", .AutoSize = True, .Anchor = AnchorStyles.Left}, 0, 1)
+        _lot.Text = currentLot
+        _lot.Dock = DockStyle.Fill
+        layout.Controls.Add(_lot, 1, 1)
+
+        Dim buttons As New FlowLayoutPanel With {.Dock = DockStyle.Fill, .FlowDirection = FlowDirection.RightToLeft}
+        Dim save = New Button With {.Text = "Save", .DialogResult = DialogResult.OK}
+        buttons.Controls.Add(save)
+        buttons.Controls.Add(New Button With {.Text = "Cancel", .DialogResult = DialogResult.Cancel})
+        layout.Controls.Add(buttons, 0, 2)
+        layout.SetColumnSpan(buttons, 2)
+        AcceptButton = save
+        CancelButton = buttons.Controls.OfType(Of Button)().Last()
+    End Sub
+End Class
+
+Public NotInheritable Class OperatorEditDialog
+    Inherits Form
+
+    Private ReadOnly _operator As New TextBox()
+
+    Public ReadOnly Property OperatorNameValue As String
+        Get
+            Return _operator.Text.Trim()
+        End Get
+    End Property
+
+    Public Sub New(currentOperator As String)
+        Text = "Edit Operator"
+        StartPosition = FormStartPosition.CenterParent
+        FormBorderStyle = FormBorderStyle.FixedDialog
+        MaximizeBox = False
+        MinimizeBox = False
+        ClientSize = New Size(380, 150)
+
+        Dim layout As New TableLayoutPanel With {.Dock = DockStyle.Fill, .Padding = New Padding(16), .ColumnCount = 2, .RowCount = 2}
+        layout.ColumnStyles.Add(New ColumnStyle(SizeType.Absolute, 120))
+        layout.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100))
+        Controls.Add(layout)
+
+        layout.Controls.Add(New Label With {.Text = "Operator", .AutoSize = True, .Anchor = AnchorStyles.Left}, 0, 0)
+        _operator.Text = currentOperator
+        _operator.Dock = DockStyle.Fill
+        layout.Controls.Add(_operator, 1, 0)
+
+        Dim buttons As New FlowLayoutPanel With {.Dock = DockStyle.Fill, .FlowDirection = FlowDirection.RightToLeft}
+        Dim save = New Button With {.Text = "Save", .DialogResult = DialogResult.OK}
+        AddHandler save.Click, AddressOf Submit
+        buttons.Controls.Add(save)
+        buttons.Controls.Add(New Button With {.Text = "Cancel", .DialogResult = DialogResult.Cancel})
+        layout.Controls.Add(buttons, 0, 1)
+        layout.SetColumnSpan(buttons, 2)
+        AcceptButton = save
+        CancelButton = buttons.Controls.OfType(Of Button)().Last()
+    End Sub
+
+    Private Sub Submit(sender As Object, eventArgs As EventArgs)
+        If String.IsNullOrWhiteSpace(_operator.Text) Then
+            MessageBox.Show(Me, "Enter Operator before saving.", "Missing Operator", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+            DialogResult = DialogResult.None
+        End If
+    End Sub
+End Class
+
 Public NotInheritable Class CellEditDialog
     Inherits Form
 
@@ -446,6 +542,141 @@ Public NotInheritable Class CellEditDialog
             MessageBox.Show(Me, "Diameter must be a number.", "Invalid Diameter", MessageBoxButtons.OK, MessageBoxIcon.Warning)
             DialogResult = DialogResult.None
         End If
+    End Sub
+End Class
+
+Public NotInheritable Class EditLogViewerDialog
+    Inherits Form
+
+    Private ReadOnly _store As EditLogStore
+    Private ReadOnly _grid As New DataGridView()
+    Private ReadOnly _empty As New Label()
+    Private ReadOnly _count As New Label()
+
+    Public Sub New(store As EditLogStore)
+        _store = store
+        Text = "Edit Log"
+        StartPosition = FormStartPosition.CenterParent
+        FormBorderStyle = FormBorderStyle.Sizable
+        MinimizeBox = False
+        ClientSize = New Size(920, 500)
+        MinimumSize = New Size(680, 380)
+
+        _grid.Dock = DockStyle.Fill
+        _grid.ReadOnly = True
+        _grid.AllowUserToAddRows = False
+        _grid.AllowUserToDeleteRows = False
+        _grid.AllowUserToResizeRows = False
+        _grid.RowHeadersVisible = False
+        _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect
+        _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill
+        _grid.BackgroundColor = Color.White
+        _grid.BorderStyle = BorderStyle.None
+        _grid.EnableHeadersVisualStyles = False
+        _grid.ColumnHeadersDefaultCellStyle.Font = New Font("Segoe UI", 9, FontStyle.Bold)
+        AddColumn("Timestamp", 16)
+        AddColumn("Operator", 14)
+        AddColumn("Target", 22)
+        AddColumn("Field", 14)
+        AddColumn("Before", 17)
+        AddColumn("After", 17)
+
+        _empty.Text = "No edits have been logged yet."
+        _empty.Dock = DockStyle.Fill
+        _empty.TextAlign = ContentAlignment.MiddleCenter
+        _empty.ForeColor = Color.DimGray
+        _empty.Font = New Font("Segoe UI", 11)
+        _empty.Visible = False
+
+        Dim buttons As New FlowLayoutPanel With {
+            .Dock = DockStyle.Bottom,
+            .FlowDirection = FlowDirection.RightToLeft,
+            .Height = 50,
+            .Padding = New Padding(8)
+        }
+        Dim closeButton = New Button With {.Text = "Close", .DialogResult = DialogResult.Cancel, .AutoSize = True}
+        Dim exportButton = New Button With {.Text = "Export to Excel", .AutoSize = True}
+        AddHandler exportButton.Click, AddressOf ExportXlsx
+        Dim openButton = New Button With {.Text = "Open CSV", .AutoSize = True}
+        AddHandler openButton.Click, AddressOf OpenCsv
+        Dim refreshButton = New Button With {.Text = "Refresh", .AutoSize = True}
+        AddHandler refreshButton.Click, Sub() LoadEntries()
+        buttons.Controls.Add(closeButton)
+        buttons.Controls.Add(exportButton)
+        buttons.Controls.Add(openButton)
+        buttons.Controls.Add(refreshButton)
+
+        _count.AutoSize = True
+        _count.Anchor = AnchorStyles.Left
+        _count.Margin = New Padding(10, 14, 0, 0)
+        _count.ForeColor = Color.DimGray
+        buttons.Controls.Add(_count)
+
+        Controls.Add(_grid)
+        Controls.Add(_empty)
+        Controls.Add(buttons)
+        CancelButton = closeButton
+
+        LoadEntries()
+    End Sub
+
+    Private Sub AddColumn(title As String, fillWeight As Integer)
+        Dim column As New DataGridViewTextBoxColumn With {
+            .Name = title,
+            .HeaderText = title,
+            .FillWeight = fillWeight,
+            .SortMode = DataGridViewColumnSortMode.NotSortable
+        }
+        _grid.Columns.Add(column)
+    End Sub
+
+    Private Sub LoadEntries()
+        _grid.Rows.Clear()
+        Dim entries = _store.ReadAll().OrderByDescending(Function(entry) entry.Timestamp).ToList()
+        For Each entry In entries
+            _grid.Rows.Add(
+                entry.Timestamp.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+                entry.OperatorName,
+                entry.Target,
+                entry.Field,
+                entry.OldValue,
+                entry.NewValue
+            )
+        Next
+        _grid.Visible = entries.Count > 0
+        _empty.Visible = entries.Count = 0
+        _count.Text = $"{entries.Count} edit(s) logged"
+    End Sub
+
+    Private Sub ExportXlsx(sender As Object, eventArgs As EventArgs)
+        Using dialog As New SaveFileDialog With {
+            .Title = "Export edit log to Excel",
+            .Filter = "Excel workbook (*.xlsx)|*.xlsx",
+            .FileName = $"EditLog_{Date.Now:yyyyMMdd_HHmmss}.xlsx"
+        }
+            If dialog.ShowDialog(Me) <> DialogResult.OK Then Return
+            Try
+                _store.ExportToXlsx(dialog.FileName)
+                MessageBox.Show(Me, "Edit log exported to Excel.", "Export Edit Log", MessageBoxButtons.OK, MessageBoxIcon.Information)
+            Catch ex As Exception
+                MessageBox.Show(Me, ex.Message, "Export Edit Log failed", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            End Try
+        End Using
+    End Sub
+
+    Private Sub OpenCsv(sender As Object, eventArgs As EventArgs)
+        If Not IO.File.Exists(_store.FilePath) Then
+            MessageBox.Show(Me, "No edit log file has been created yet.", "Edit Log", MessageBoxButtons.OK, MessageBoxIcon.Information)
+            Return
+        End If
+        Try
+            Diagnostics.Process.Start(New Diagnostics.ProcessStartInfo With {
+                .FileName = _store.FilePath,
+                .UseShellExecute = True
+            })
+        Catch ex As Exception
+            MessageBox.Show(Me, ex.Message, "Open Edit Log failed", MessageBoxButtons.OK, MessageBoxIcon.Error)
+        End Try
     End Sub
 End Class
 
