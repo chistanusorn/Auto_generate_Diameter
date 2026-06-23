@@ -11,6 +11,8 @@ Imports ClosedXML.Excel
 Public NotInheritable Class EditLogEntry
     Public Property Timestamp As DateTime
     Public Property OperatorName As String = ""
+    Public Property CoatLotNo As String = ""
+    Public Property DipLotNumber As String = ""
     Public Property Target As String = ""
     Public Property Field As String = ""
     Public Property OldValue As String = ""
@@ -21,13 +23,21 @@ End Class
 ' in-app viewer. Can also render the same history to an .xlsx workbook for printing.
 Public NotInheritable Class EditLogStore
     Private Const TimestampFormat As String = "yyyy-MM-dd HH:mm:ss"
-    Private Shared ReadOnly Columns As String() = {"Timestamp", "Operator", "Target", "Field", "Before", "After"}
+    Private Shared ReadOnly Columns As String() = {"Timestamp", "Operator", "CoatLotNo", "DipLotNumber", "Target", "Field", "Before", "After"}
 
     Private ReadOnly _path As String
 
     Public Sub New(path As String)
         If String.IsNullOrWhiteSpace(path) Then Throw New ArgumentException("Log path is required.", NameOf(path))
         _path = path
+    End Sub
+
+    Public Sub Clear()
+        Try
+            If IO.File.Exists(_path) Then IO.File.Delete(_path)
+        Catch
+            ' Ignore
+        End Try
     End Sub
 
     Public ReadOnly Property FilePath As String
@@ -66,10 +76,12 @@ Public NotInheritable Class EditLogStore
             entries.Add(New EditLogEntry With {
                 .Timestamp = stamp,
                 .OperatorName = fields(1),
-                .Target = fields(2),
-                .Field = fields(3),
-                .OldValue = fields(4),
-                .NewValue = fields(5)
+                .CoatLotNo = If(fields.Count > 7, fields(2), ""),
+                .DipLotNumber = If(fields.Count > 7, fields(3), ""),
+                .Target = If(fields.Count > 7, fields(4), fields(2)),
+                .Field = If(fields.Count > 7, fields(5), fields(3)),
+                .OldValue = If(fields.Count > 7, fields(6), fields(4)),
+                .NewValue = If(fields.Count > 7, fields(7), fields(5))
             })
         Next
         Return entries
@@ -106,6 +118,8 @@ Public NotInheritable Class EditLogStore
         Return {
             entry.Timestamp.ToString(TimestampFormat, CultureInfo.InvariantCulture),
             entry.OperatorName,
+            entry.CoatLotNo,
+            entry.DipLotNumber,
             entry.Target,
             entry.Field,
             entry.OldValue,

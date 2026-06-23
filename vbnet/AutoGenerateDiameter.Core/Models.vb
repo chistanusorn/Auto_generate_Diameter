@@ -58,6 +58,7 @@ Public NotInheritable Class SourceRecord
     Public Property TrayLotNumber As String = ""
     Public Property UsedFlag As String = ""
     Public Property Diameter As Double
+    Public Property CoatWorksheetName As String = ""
 End Class
 
 Public NotInheritable Class ImportedReport

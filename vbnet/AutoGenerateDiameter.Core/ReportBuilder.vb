@@ -114,6 +114,11 @@ Public NotInheritable Class ReportBuilder
             Dim sheet As New SheetData With {
                 .PageNumber = pageIndex + 1,
                 .TotalPages = totalPages,
+                .Item = first.CoatWorksheetName,
+                .PlateNo = "",
+                .DateTimeStamp = dateTimeStamp,
+                .DomeType = "",
+                .CoatLotNo = first.CoatLotNumber,
                 .OperatorName = ""
             }
 

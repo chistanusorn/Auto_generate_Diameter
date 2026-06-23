@@ -2,27 +2,29 @@ Option Strict On
 Option Explicit On
 
 Imports ClosedXML.Excel
+Imports System.Text.RegularExpressions
 
 Public NotInheritable Class XlsxReportImporter
+    Private Const HeaderSearchRowLimit As Integer = 50
+
     Private Shared ReadOnly RequiredColumns As String() = {
         "coat_lot_number", "coat_lot_seq", "dip_lot_number", "diplt_seq",
         "rl_type", "rlp_lot", "tray_number", "item_type_name", "rxarrangement_number",
         "order_route_type_name", "traylot_number", "used_flag", "diameter"
     }
 
+    Private Shared ReadOnly ColumnAliases As Dictionary(Of String, String) = BuildColumnAliases()
+
     Public Function Import(path As String) As ImportedReport
         If Not IO.File.Exists(path) Then Throw New IO.FileNotFoundException("XLSX file was not found.", path)
 
         Using workbook As New XLWorkbook(path)
             Dim worksheet = workbook.Worksheets.First()
-            Dim headerRow = worksheet.FirstRowUsed()
-            If headerRow Is Nothing Then Throw New InvalidOperationException("The first worksheet is empty.")
+            Dim firstRow = worksheet.FirstRowUsed()
+            If firstRow Is Nothing Then Throw New InvalidOperationException("The first worksheet is empty.")
 
-            Dim headers = headerRow.CellsUsed().ToDictionary(
-                Function(cell) cell.GetString().Trim(),
-                Function(cell) cell.Address.ColumnNumber,
-                StringComparer.OrdinalIgnoreCase
-            )
+            Dim headerRow = FindHeaderRow(worksheet, firstRow.RowNumber())
+            Dim headers = BuildHeaderMap(headerRow)
             Dim missing = RequiredColumns.Where(Function(column) Not headers.ContainsKey(column)).ToArray()
             If missing.Length > 0 Then
                 Throw New InvalidOperationException($"Missing required columns: {String.Join(", ", missing)}")
@@ -46,7 +48,8 @@ Public NotInheritable Class XlsxReportImporter
                     .OrderRouteTypeName = Value(row, headers, "order_route_type_name"),
                     .TrayLotNumber = Value(row, headers, "traylot_number"),
                     .UsedFlag = Value(row, headers, "used_flag"),
-                    .Diameter = DoubleValue(row, headers, "diameter")
+                    .Diameter = DoubleValue(row, headers, "diameter"),
+                    .CoatWorksheetName = If(headers.ContainsKey("coat_worksheet_name"), Value(row, headers, "coat_worksheet_name"), "")
                 })
             Next
 
@@ -54,6 +57,57 @@ Public NotInheritable Class XlsxReportImporter
             Return New ReportBuilder().Build(records, IO.File.GetLastWriteTime(path).ToString("yyyy-MM-dd HH:mm"))
         End Using
     End Function
+
+    Private Shared Function FindHeaderRow(worksheet As IXLWorksheet, firstRowNumber As Integer) As IXLRow
+        Dim lastRowNumber = worksheet.LastRowUsed().RowNumber()
+        Dim searchUntil = Math.Min(lastRowNumber, firstRowNumber + HeaderSearchRowLimit - 1)
+        Dim bestRow = worksheet.Row(firstRowNumber)
+        Dim bestMatchCount = -1
+
+        For rowNumber = firstRowNumber To searchUntil
+            Dim row = worksheet.Row(rowNumber)
+            Dim headers = BuildHeaderMap(row)
+            Dim matchCount = RequiredColumns.Count(Function(column) headers.ContainsKey(column))
+            If matchCount > bestMatchCount Then
+                bestRow = row
+                bestMatchCount = matchCount
+            End If
+            If matchCount = RequiredColumns.Length Then Return row
+        Next
+
+        Return bestRow
+    End Function
+
+    Private Shared Function BuildHeaderMap(row As IXLRow) As Dictionary(Of String, Integer)
+        Dim headers As New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
+        For Each cell In row.CellsUsed()
+            Dim columnName = CanonicalColumnName(cell.GetString())
+            If String.IsNullOrWhiteSpace(columnName) OrElse headers.ContainsKey(columnName) Then Continue For
+            headers(columnName) = cell.Address.ColumnNumber
+        Next
+        Return headers
+    End Function
+
+    Private Shared Function CanonicalColumnName(text As String) As String
+        Dim normalized = Regex.Replace(text.Trim().ToLowerInvariant(), "[^a-z0-9]", "")
+        If ColumnAliases.ContainsKey(normalized) Then Return ColumnAliases(normalized)
+        Return text.Trim()
+    End Function
+
+    Private Shared Function BuildColumnAliases() As Dictionary(Of String, String)
+        Dim aliases As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+        For Each column In RequiredColumns
+            aliases(Regex.Replace(column.ToLowerInvariant(), "[^a-z0-9]", "")) = column
+        Next
+
+        ' Keep only non-matching alias name mapping to prevent accidental matches with short/abbreviated names
+        AddAlias(aliases, "dip lot seq", "diplt_seq")
+        Return aliases
+    End Function
+
+    Private Shared Sub AddAlias(aliases As Dictionary(Of String, String), aliasName As String, columnName As String)
+        aliases(Regex.Replace(aliasName.ToLowerInvariant(), "[^a-z0-9]", "")) = columnName
+    End Sub
 
     Private Shared Function Value(row As IXLRow, headers As Dictionary(Of String, Integer), name As String) As String
         Return row.Cell(headers(name)).GetFormattedString().Trim()

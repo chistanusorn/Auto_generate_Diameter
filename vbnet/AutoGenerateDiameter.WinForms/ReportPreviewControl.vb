@@ -310,7 +310,7 @@ Public NotInheritable Class ReportPreviewControl
 
     Private Shared Sub DrawField(graphics As Graphics, label As String, value As String, labelX As Single, y As Single, valueX As Single, labelSize As Single)
         DrawText(graphics, label, labelX, y, labelSize, True, Color.Black, ContentAlignment.MiddleLeft)
-        DrawText(graphics, value, valueX + 8, y + 3, 16, True, DataColor, ContentAlignment.MiddleLeft)
+        DrawText(graphics, value, valueX + 8, y + 3, 20, True, DataColor, ContentAlignment.MiddleLeft)
     End Sub
 
     Private Shared Sub DrawTrayBlock(graphics As Graphics, sheet As SheetData, top As Integer, firstPosition As Integer)

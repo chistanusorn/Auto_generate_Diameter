@@ -54,4 +54,25 @@ Public Class EditLogStoreTests
         Dim store As New EditLogStore(path)
         Assert.AreEqual(0, store.ReadAll().Count)
     End Sub
+
+    <TestMethod>
+    Public Sub ClearDeletesLogFile()
+        Dim path = IO.Path.Combine(IO.Path.GetTempPath(), $"{Guid.NewGuid()}.csv")
+        Try
+            Dim store As New EditLogStore(path)
+            store.Append({New EditLogEntry With {
+                .Timestamp = DateTime.Now,
+                .OperatorName = "test",
+                .Target = "test",
+                .Field = "test",
+                .OldValue = "test",
+                .NewValue = "test"
+            }})
+            Assert.IsTrue(IO.File.Exists(path))
+            store.Clear()
+            Assert.IsFalse(IO.File.Exists(path))
+        Finally
+            If IO.File.Exists(path) Then IO.File.Delete(path)
+        End Try
+    End Sub
 End Class
